@@ -1,0 +1,214 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+//  Fear Stars BUY
+//  Μετράει τον «φόβο» της αγοράς (0–100) από 5 συνιστώσες και βγάζει
+//  σήματα BUY από ★ έως ★★★★, μαζί με πίνακα στατιστικών για το τι
+//  ακολούθησε μετά από κάθε σήμα.
+//  Προτεινόμενη χρήση: BTCUSD ή CRYPTOCAP:BTC σε Weekly (1W) γράφημα.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("Fear Stars BUY", shorttitle = "FearStars", overlay = true, max_labels_count = 500)
+
+// ── Βάρη ─────────────────────────────────────────────────────────────────────
+grpW = "Βάρη συνιστωσών φόβου"
+wDD  = input.float(30, "Drawdown από ATH",            minval = 0, group = grpW)
+wMA  = input.float(25, "Απόσταση κάτω από MA",        minval = 0, group = grpW)
+wRSI = input.float(20, "RSI",                          minval = 0, group = grpW)
+wROC = input.float(15, "Ταχύτητα πτώσης (ROC)",        minval = 0, group = grpW)
+wCap = input.float(10, "Capitulation όγκου",           minval = 0, group = grpW)
+
+// ── Παράμετροι ───────────────────────────────────────────────────────────────
+grpP    = "Παράμετροι (σε μπάρες)"
+maLen   = input.int(50,   "Μήκος MA (50 ≈ 1 χρόνος σε 1W)",   minval = 2, group = grpP)
+rsiLen  = input.int(14,   "Μήκος RSI",                         minval = 2, group = grpP)
+rocLen  = input.int(13,   "Μήκος ROC (13 ≈ 1 τρίμηνο σε 1W)",  minval = 1, group = grpP)
+volLen  = input.int(26,   "Μήκος μέσου όγκου",                 minval = 2, group = grpP)
+ddFull  = input.float(80, "Drawdown για μέγιστο φόβο (%)",     minval = 1, group = grpP)
+maFull  = input.float(50, "% κάτω από MA για μέγιστο φόβο",    minval = 1, group = grpP)
+rocFull = input.float(50, "% πτώση ROC για μέγιστο φόβο",      minval = 1, group = grpP)
+smooth  = input.int(1,    "Εξομάλυνση (EMA, 1 = καμία)",       minval = 1, group = grpP)
+
+// ── Κατώφλια αστεριών ───────────────────────────────────────────────────────
+grpT  = "Κατώφλια σημάτων (Fear Score)"
+t1    = input.float(55, "★",                 minval = 0, maxval = 100, group = grpT)
+t2    = input.float(65, "★★",                minval = 0, maxval = 100, group = grpT)
+t3    = input.float(75, "★★★",               minval = 0, maxval = 100, group = grpT)
+t4    = input.float(85, "★★★★",              minval = 0, maxval = 100, group = grpT)
+reset = input.float(10, "Reset: πόσο κάτω από ★ για νέο κύκλο", minval = 0, group = grpT,
+     tooltip = "Μετά από ένα σήμα, ίδιο ή μικρότερο επίπεδο ξαναβγαίνει μόνο όταν ο φόβος πέσει κάτω από (★ − αυτή την τιμή). Μεγαλύτερο επίπεδο βγαίνει πάντα.")
+
+// ── Στατιστικά / εμφάνιση ───────────────────────────────────────────────────
+grpS     = "Στατιστικά & εμφάνιση"
+h1       = input.int(13, "Ορίζοντας απόδοσης 1 (μπάρες)", minval = 1, group = grpS)
+h2       = input.int(26, "Ορίζοντας απόδοσης 2 (μπάρες)", minval = 1, group = grpS)
+h3       = input.int(52, "Ορίζοντας απόδοσης 3 (μπάρες)", minval = 1, group = grpS)
+showTbl  = input.bool(true, "Εμφάνιση πίνακα", group = grpS)
+tblPosIn = input.string("Πάνω δεξιά", "Θέση πίνακα",
+     options = ["Πάνω δεξιά", "Πάνω αριστερά", "Κάτω δεξιά", "Κάτω αριστερά"], group = grpS)
+showBg   = input.bool(false, "Χρώμα φόντου όσο ο φόβος είναι ≥ ★", group = grpS)
+
+// ── Βοηθητικά ────────────────────────────────────────────────────────────────
+clamp01(float x) => math.max(0.0, math.min(1.0, x))
+
+stars(int n) =>
+    n == 1 ? "★" : n == 2 ? "★★" : n == 3 ? "★★★" : n == 4 ? "★★★★" : ""
+
+lvlColor(int n) =>
+    n == 1 ? color.new(#66BB6A, 0) : n == 2 ? color.new(#43A047, 0) : n == 3 ? color.new(#2E7D32, 0) : color.new(#1B5E20, 0)
+
+fmtPct(float v) =>
+    na(v) ? "—" : (v >= 0 ? "+" : "") + str.tostring(v, "#.#") + "%"
+
+// ── Συνιστώσες φόβου (κάθε μία 0–100) ───────────────────────────────────────
+var float ath = na
+ath := na(ath) ? high : math.max(ath, high)
+float ddPct = (ath - close) / ath * 100
+float sDD   = clamp01(ddPct / ddFull) * 100
+
+float ma  = ta.sma(close, maLen)
+float sMA = na(ma) ? na : clamp01((1 - close / ma) * 100 / maFull) * 100
+
+float rsi  = ta.rsi(close, rsiLen)
+float sRSI = na(rsi) ? na : clamp01((50 - rsi) / 30) * 100   // RSI 50 → 0, RSI 20 → 100
+
+float roc  = ta.roc(close, rocLen)
+float sROC = na(roc) ? na : clamp01(-roc / rocFull) * 100
+
+bool  hasVol = not na(volume) and volume > 0
+float vMean  = ta.sma(volume, volLen)
+float vDev   = ta.stdev(volume, volLen)
+float volZ   = na(vDev) or vDev == 0 ? na : (volume - vMean) / vDev
+float sCap   = hasVol and not na(volZ) ? (close < open ? clamp01(volZ / 3) * 100 : 0.0) : na
+
+// Σταθμισμένος μέσος όρος μόνο από τις διαθέσιμες συνιστώσες
+float num = 0.0
+float den = 0.0
+if not na(sDD)
+    num += sDD * wDD
+    den += wDD
+if not na(sMA)
+    num += sMA * wMA
+    den += wMA
+if not na(sRSI)
+    num += sRSI * wRSI
+    den += wRSI
+if not na(sROC)
+    num += sROC * wROC
+    den += wROC
+if not na(sCap)
+    num += sCap * wCap
+    den += wCap
+
+float rawFear = den > 0 ? num / den : na
+float fear    = ta.ema(rawFear, smooth)
+
+// ── Σήματα ───────────────────────────────────────────────────────────────────
+int level = na(fear) ? 0 : fear >= t4 ? 4 : fear >= t3 ? 3 : fear >= t2 ? 2 : fear >= t1 ? 1 : 0
+
+var int lastLvl = 0          // μέγιστο επίπεδο που έχει δοθεί στον τρέχοντα κύκλο φόβου
+bool sig = false
+if barstate.isconfirmed
+    if not na(fear) and fear < t1 - reset
+        lastLvl := 0
+    if level > lastLvl
+        sig     := true
+        lastLvl := level
+
+if sig
+    label.new(bar_index, low, "BUY\n" + stars(level), yloc = yloc.belowbar,
+         style = label.style_label_up, color = lvlColor(level), textcolor = color.white, size = size.small,
+         tooltip = "Fear Score: " + str.tostring(fear, "#.0") + " / 100")
+
+bgcolor(showBg and level > 0 ? color.new(lvlColor(level), 88) : na)
+
+plot(fear, "Fear Score", color = color.orange, display = display.data_window + display.status_line)
+
+alertcondition(sig and level == 1, "BUY ★",    "Fear Stars: BUY ★ στο {{ticker}}")
+alertcondition(sig and level == 2, "BUY ★★",   "Fear Stars: BUY ★★ στο {{ticker}}")
+alertcondition(sig and level == 3, "BUY ★★★",  "Fear Stars: BUY ★★★ στο {{ticker}}")
+alertcondition(sig and level == 4, "BUY ★★★★", "Fear Stars: BUY ★★★★ στο {{ticker}}")
+alertcondition(sig, "Οποιοδήποτε BUY", "Fear Stars: νέο σήμα BUY στο {{ticker}}")
+
+// ── Στατιστικά: τι ακολούθησε μετά από κάθε σήμα ───────────────────────────
+var array<int>   pBar   = array.new<int>()       // σήματα που περιμένουν να «ωριμάσουν»
+var array<float> pPx    = array.new<float>()
+var array<int>   pLvl   = array.new<int>()
+var array<int>   cnt    = array.new<int>(4, 0)   // πλήθος σημάτων ανά επίπεδο
+var array<int>   lastT  = array.new<int>(4, 0)   // ημερομηνία τελευταίου σήματος
+var array<float> lastPx = array.new<float>(4, na)
+var array<float> sumR   = array.new<float>(12, 0.0)  // [επίπεδο*3 + ορίζοντας]
+var array<int>   nR     = array.new<int>(12, 0)
+var array<int>   winR   = array.new<int>(12, 0)
+var array<int>   hs     = array.from(h1, h2, h3)
+int maxH = math.max(h1, math.max(h2, h3))
+
+if barstate.isconfirmed
+    int n = pBar.size()
+    if n > 0
+        for i = n - 1 to 0
+            int age = bar_index - pBar.get(i)
+            int lv  = pLvl.get(i) - 1
+            for k = 0 to 2
+                if age == hs.get(k)
+                    float r   = (close / pPx.get(i) - 1) * 100
+                    int   idx = lv * 3 + k
+                    sumR.set(idx, sumR.get(idx) + r)
+                    nR.set(idx, nR.get(idx) + 1)
+                    if r > 0
+                        winR.set(idx, winR.get(idx) + 1)
+            if age >= maxH
+                pBar.remove(i)
+                pPx.remove(i)
+                pLvl.remove(i)
+
+if sig
+    int lv = level - 1
+    pBar.push(bar_index)
+    pPx.push(close)
+    pLvl.push(level)
+    cnt.set(lv, cnt.get(lv) + 1)
+    lastT.set(lv, time)
+    lastPx.set(lv, close)
+
+// ── Πίνακας ──────────────────────────────────────────────────────────────────
+tblPos = switch tblPosIn
+    "Πάνω αριστερά" => position.top_left
+    "Κάτω δεξιά"    => position.bottom_right
+    "Κάτω αριστερά" => position.bottom_left
+    => position.top_right
+
+var table tbl = table.new(tblPos, 7, 6, bgcolor = color.new(#131722, 0), border_color = color.new(#2A2E39, 0),
+     border_width = 1, frame_color = color.new(#2A2E39, 0), frame_width = 1)
+
+cell(int c, int r, string txt, color tc = color.white, color bg = na) =>
+    table.cell(tbl, c, r, txt, text_color = tc, text_size = size.small, bgcolor = bg)
+
+if showTbl and barstate.islast
+    color hdr = color.new(#2A2E39, 0)
+    cell(0, 0, "Σήμα",       color.silver, hdr)
+    cell(1, 0, "Φορές",      color.silver, hdr)
+    cell(2, 0, "Τελευταίο",  color.silver, hdr)
+    cell(3, 0, "Από τότε",   color.silver, hdr)
+    cell(4, 0, "+" + str.tostring(h1) + " μπ.", color.silver, hdr)
+    cell(5, 0, "+" + str.tostring(h2) + " μπ.", color.silver, hdr)
+    cell(6, 0, "+" + str.tostring(h3) + " μπ.", color.silver, hdr)
+    for lv = 0 to 3
+        int row = lv + 1
+        int c   = cnt.get(lv)
+        cell(0, row, "BUY " + stars(lv + 1), color.white, lvlColor(lv + 1))
+        cell(1, row, str.tostring(c))
+        cell(2, row, c > 0 ? str.format_time(lastT.get(lv), "dd/MM/yyyy", syminfo.timezone) : "—")
+        float since = c > 0 ? (close / lastPx.get(lv) - 1) * 100 : na
+        cell(3, row, fmtPct(since), na(since) ? color.white : since >= 0 ? color.lime : color.red)
+        for k = 0 to 2
+            int   idx = lv * 3 + k
+            int   nn  = nR.get(idx)
+            float avg = nn > 0 ? sumR.get(idx) / nn : na
+            string t  = nn > 0 ? fmtPct(avg) + " (" + str.tostring(winR.get(idx)) + "/" + str.tostring(nn) + ")" : "—"
+            cell(4 + k, row, t, na(avg) ? color.white : avg >= 0 ? color.lime : color.red)
+    cell(0, 5, "Φόβος τώρα", color.silver, hdr)
+    cell(1, 5, na(fear) ? "—" : str.tostring(fear, "#") + "/100", color.orange)
+    cell(2, 5, level > 0 ? stars(level) : "—", color.orange)
+    cell(3, 5, "Από ATH", color.silver, hdr)
+    cell(4, 5, "-" + str.tostring(ddPct, "#.#") + "%", color.orange)
+    cell(5, 5, "")
+    cell(6, 5, "")
